@@ -1,11 +1,12 @@
-# 音频文件缓存配置
-*.wav
+# 音频文件缓存配置 (匹配所有以 .wav 结尾的请求)
+/**/*.wav
   Cache-Control: public, max-age=31536000, immutable
   Content-Type: audio/wav
 
-# HTML 和 JS 文件缓存配置
-*.html
+# HTML 缓存配置
+/**/*.html
   Cache-Control: public, max-age=3600
 
-*.js
-  Cache-Control: public, max-age=3600 
+# JS 缓存配置
+/**/*.js
+  Cache-Control: public, max-age=3600
