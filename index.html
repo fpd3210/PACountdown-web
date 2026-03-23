@@ -18,7 +18,6 @@
             }
         }
     </script>
-    <script defer src="https://umami.forecho.com/js/analytics.js" data-website-id="c13c84ad-002a-4a14-bc43-22406ebca773"></script>
 </head>
 <body class="min-h-screen transition-colors duration-300 bg-gradient-to-br from-blue-50 to-indigo-100 dark:from-gray-900 dark:to-gray-800 flex items-center justify-center p-4">
     <div id="app" class="w-full max-w-md">
@@ -542,6 +541,10 @@
                     // 页面可见性变化处理
                     document.addEventListener('visibilitychange', () => {
                         if (!document.hidden) {
+                            // 切走后 tick 在后台往往不响，但 tickPlayedKeys 仍被记过；
+                            // 再切回时若剩余秒与已记录重复，会去重跳过 → “只有第一次回会响”。
+                            // 每次重新可见时清空 tick 去重，让当前剩余秒能再响一次，后续每秒照常。
+                            tickPlayedKeys.clear();
                             resetTimer();
                         }
                     });
