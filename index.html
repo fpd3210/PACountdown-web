@@ -139,7 +139,8 @@
                 let lastFinalSoundCycleKey = null;
                 let finalTickResetTimeout = null;
                 let lastSecondsIntoInterval = null;
-                let lastVisibilityRecoverAt = 0;
+                // 合并短时间内多次 visibilitychange，避免重复 reset 导致前几声连响
+                let visibilityRecoverTimer = null;
                 // 记录当前会话内，某个 5 分钟周期的哪些秒已经播放过 tick，
                 // 避免切走/切回后“只响一次/跳过后续”的问题。
                 let tickPlayedKeys = new Set();
@@ -541,18 +542,21 @@
 
                     // 页面可见性变化处理
                     document.addEventListener('visibilitychange', () => {
-                        if (!document.hidden) {
-                            const nowTs = Date.now();
-                            // 某些环境切回时会短时间触发多次 visible，防止重复 reset 导致前几声过快。
-                            if (nowTs - lastVisibilityRecoverAt < 1200) return;
-                            lastVisibilityRecoverAt = nowTs;
-
+                        if (document.hidden) return;
+                        clearTimeout(visibilityRecoverTimer);
+                        // 短延迟合并多次事件；不要用长防抖（会误跳过真实切回 → 延迟数秒才响）
+                        visibilityRecoverTimer = setTimeout(() => {
+                            visibilityRecoverTimer = null;
                             // 切走后 tick 在后台往往不响，但 tickPlayedKeys 仍被记过；
-                            // 再切回时若剩余秒与已记录重复，会去重跳过 → “只有第一次回会响”。
-                            // 每次重新可见时清空 tick 去重，让当前剩余秒能再响一次，后续每秒照常。
+                            // 清空后当前剩余秒可再响一次。
                             tickPlayedKeys.clear();
-                            resetTimer();
-                        }
+                            // 不要每次 stop/start 主计时器（易与 250ms 轮询叠加 → 前几声连响、或恢复变慢）
+                            if (!isTimerRunning.value) {
+                                checkMarketHours();
+                            } else {
+                                syncCountdownAndMaybeSound();
+                            }
+                        }, 50);
                     });
                 });
 
@@ -560,6 +564,10 @@
                     if (mainTimer) clearInterval(mainTimer);
                     if (clockTimer) clearInterval(clockTimer);
                     if (marketCheckTimer) clearInterval(marketCheckTimer);
+                    if (visibilityRecoverTimer) {
+                        clearTimeout(visibilityRecoverTimer);
+                        visibilityRecoverTimer = null;
+                    }
                     if (finalTickResetTimeout) {
                         clearTimeout(finalTickResetTimeout);
                         finalTickResetTimeout = null;
