@@ -145,6 +145,13 @@
                 // 避免切走/切回后“只响一次/跳过后续”的问题。
                 let tickPlayedKeys = new Set();
                 let hiddenTickNotifiedKey = null;
+                // Web Audio：用于在后台也能“提前调度”播放，避免后台标签页定时器节流。
+                let audioContext = null;
+                let tickBuffer = null;
+                let finalTickBuffer = null;
+                let audioBuffersReady = false;
+                // 记录哪些周期的 final_tick 已经提前调度，避免重复播放
+                let finalScheduledCycleKeys = new Set();
 
                 // 多语言配置
                 const translations = {
@@ -277,6 +284,8 @@
                                 tickAudio.muted = false;
                                 finalTickAudio.muted = false;
                                 audioInitialized.value = true;
+                                // 初始化 WebAudio buffer：用于“后台也能提前排程播放”。
+                                initWebAudioBuffers();
                                 if ('Notification' in window && Notification.permission === 'default') {
                                     Notification.requestPermission().catch(() => {});
                                 }
@@ -319,6 +328,98 @@
                             });
                         } catch (e) {
                             console.log('Final tick音频播放错误:', e);
+                        }
+                    }
+                };
+
+                const initWebAudioBuffers = async () => {
+                    if (audioBuffersReady) return;
+                    try {
+                        const Ctx = window.AudioContext || window.webkitAudioContext;
+                        if (!Ctx) return;
+
+                        if (!audioContext) {
+                            audioContext = new Ctx();
+                        }
+
+                        // 确保上下文处于运行态（用户手势后应可恢复）
+                        await audioContext.resume();
+
+                        const loadBuffer = async (url) => {
+                            const res = await fetch(url, { cache: 'force-cache' });
+                            const arr = await res.arrayBuffer();
+                            return await audioContext.decodeAudioData(arr);
+                        };
+
+                        tickBuffer = await loadBuffer('tick.wav');
+                        finalTickBuffer = await loadBuffer('final_tick.wav');
+                        audioBuffersReady = true;
+                        console.log('WebAudio buffer 已就绪');
+                    } catch (e) {
+                        console.log('WebAudio buffer 初始化失败:', e);
+                    }
+                };
+
+                const scheduleBufferAt = (buffer, whenMs) => {
+                    if (!audioBuffersReady || !audioContext || !buffer) return;
+                    // 给一点前置时间，避免“刚好过去了”导致不播放
+                    const nowMs = Date.now();
+                    const startDelaySec = Math.max(0.02, (whenMs - nowMs) / 1000);
+                    const startAt = audioContext.currentTime + startDelaySec;
+
+                    try {
+                        const source = audioContext.createBufferSource();
+                        source.buffer = buffer;
+                        source.connect(audioContext.destination);
+                        source.start(startAt);
+                    } catch (e) {
+                        console.log('scheduleBufferAt failed:', e);
+                    }
+                };
+
+                const scheduleUpcomingSoundsForBackground = (nowMs = Date.now()) => {
+                    if (!soundEnabled.value || !audioInitialized.value) return;
+                    if (!audioBuffersReady) return;
+
+                    const now = new Date(nowMs);
+                    // 获取最近的“5分钟整点边界”（秒为 0）
+                    const boundaryBase = new Date(now);
+                    boundaryBase.setMilliseconds(0);
+                    boundaryBase.setSeconds(0);
+                    boundaryBase.setMinutes(boundaryBase.getMinutes() - (boundaryBase.getMinutes() % 5));
+
+                    // 计划接下来若干个边界：覆盖倒计时窗口所在的下一段与之后一两段
+                    const horizonBoundaries = 4; // 最多约 20 分钟
+
+                    for (let i = 0; i < horizonBoundaries; i++) {
+                        const boundaryMs = boundaryBase.getTime() + i * 5 * 60 * 1000;
+                        if (boundaryMs < nowMs - 1000) continue;
+
+                        // final_tick：边界时刻播放一次
+                        const finalCycleKey = getIntervalKey(new Date(boundaryMs - 1000));
+                        const shouldFinalSoundNow = !marketModeOnly.value || isMarketOpen(new Date(boundaryMs));
+                        if (!finalScheduledCycleKeys.has(finalCycleKey) && shouldFinalSoundNow) {
+                            finalScheduledCycleKeys.add(finalCycleKey);
+                            lastFinalSoundCycleKey = finalCycleKey; // 让前台逻辑不重复播 final
+                            scheduleBufferAt(finalTickBuffer, boundaryMs);
+                        }
+
+                        // tick：边界前 r 秒，r=1..preNotificationSeconds
+                        const maxR = Math.max(1, preNotificationSeconds.value);
+                        for (let r = 1; r <= maxR; r++) {
+                            const tickMs = boundaryMs - r * 1000;
+                            if (tickMs < nowMs - 200) continue; // 过久的直接跳过
+
+                            const tickAt = new Date(tickMs);
+                            const tickIntervalKey = getIntervalKey(tickAt);
+                            const tickSoundKey = `${tickIntervalKey}:${r}`;
+                            if (tickPlayedKeys.has(tickSoundKey)) continue;
+
+                            const shouldTickSoundNow = !marketModeOnly.value || isMarketOpen(tickAt);
+                            if (!shouldTickSoundNow) continue;
+
+                            tickPlayedKeys.add(tickSoundKey);
+                            scheduleBufferAt(tickBuffer, tickMs);
                         }
                     }
                 };
@@ -568,15 +669,23 @@
 
                     // 页面可见性变化处理
                     document.addEventListener('visibilitychange', () => {
-                        if (document.hidden) return;
+                        if (document.hidden) {
+                            // 切走时立刻提前排程背景声音，避免后台定时器节流导致“完全不响”
+                            scheduleUpcomingSoundsForBackground(Date.now());
+                            return;
+                        }
+
                         clearTimeout(visibilityRecoverTimer);
                         // 短延迟合并多次事件；不要用长防抖（会误跳过真实切回 → 延迟数秒才响）
                         visibilityRecoverTimer = setTimeout(() => {
                             visibilityRecoverTimer = null;
-                            // 切走后 tick 在后台往往不响，但 tickPlayedKeys 仍被记过；
-                            // 清空后当前剩余秒可再响一次。
-                            tickPlayedKeys.clear();
                             hiddenTickNotifiedKey = null;
+
+                            // 若 WebAudio 缓冲未准备好，则退回到前台即时逻辑，需要清空去重才能继续响
+                            if (!audioBuffersReady) {
+                                tickPlayedKeys.clear();
+                            }
+
                             // 不要每次 stop/start 主计时器（易与 250ms 轮询叠加 → 前几声连响、或恢复变慢）
                             if (!isTimerRunning.value) {
                                 checkMarketHours();
