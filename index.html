@@ -145,6 +145,9 @@
                 // 避免切走/切回后“只响一次/跳过后续”的问题。
                 let tickPlayedKeys = new Set();
                 let hiddenTickNotifiedKey = null;
+                // 后台排程去重：仅表示“已创建过 BufferSource”，不等价于“音频一定已经播放成功”
+                // 否则在某些浏览器策略下（后台音频被限制/暂停），会出现“第一次有效，后续不生效”。
+                let tickScheduledKeys = new Set();
                 // Web Audio：用于在后台也能“提前调度”播放，避免后台标签页定时器节流。
                 let audioContext = null;
                 let tickBuffer = null;
@@ -380,6 +383,10 @@
                 const scheduleUpcomingSoundsForBackground = (nowMs = Date.now()) => {
                     if (!soundEnabled.value || !audioInitialized.value) return;
                     if (!audioBuffersReady) return;
+                    if (audioContext && audioContext.state === 'suspended') {
+                        // 某些环境切换到后台后会暂停音频上下文，需要再次恢复才能让排程生效。
+                        audioContext.resume().catch(() => {});
+                    }
 
                     const now = new Date(nowMs);
                     // 获取最近的“5分钟整点边界”（秒为 0）
@@ -400,7 +407,6 @@
                         const shouldFinalSoundNow = !marketModeOnly.value || isMarketOpen(new Date(boundaryMs));
                         if (!finalScheduledCycleKeys.has(finalCycleKey) && shouldFinalSoundNow) {
                             finalScheduledCycleKeys.add(finalCycleKey);
-                            lastFinalSoundCycleKey = finalCycleKey; // 让前台逻辑不重复播 final
                             scheduleBufferAt(finalTickBuffer, boundaryMs);
                         }
 
@@ -413,12 +419,12 @@
                             const tickAt = new Date(tickMs);
                             const tickIntervalKey = getIntervalKey(tickAt);
                             const tickSoundKey = `${tickIntervalKey}:${r}`;
-                            if (tickPlayedKeys.has(tickSoundKey)) continue;
+                            if (tickPlayedKeys.has(tickSoundKey) || tickScheduledKeys.has(tickSoundKey)) continue;
 
                             const shouldTickSoundNow = !marketModeOnly.value || isMarketOpen(tickAt);
                             if (!shouldTickSoundNow) continue;
 
-                            tickPlayedKeys.add(tickSoundKey);
+                            tickScheduledKeys.add(tickSoundKey);
                             scheduleBufferAt(tickBuffer, tickMs);
                         }
                     }
@@ -680,6 +686,7 @@
                         visibilityRecoverTimer = setTimeout(() => {
                             visibilityRecoverTimer = null;
                             hiddenTickNotifiedKey = null;
+                            tickScheduledKeys.clear();
 
                             // 若 WebAudio 缓冲未准备好，则退回到前台即时逻辑，需要清空去重才能继续响
                             if (!audioBuffersReady) {
