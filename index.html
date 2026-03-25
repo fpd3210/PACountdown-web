@@ -144,6 +144,7 @@
                 // 记录当前会话内，某个 5 分钟周期的哪些秒已经播放过 tick，
                 // 避免切走/切回后“只响一次/跳过后续”的问题。
                 let tickPlayedKeys = new Set();
+                let hiddenTickNotifiedKey = null;
 
                 // 多语言配置
                 const translations = {
@@ -276,6 +277,9 @@
                                 tickAudio.muted = false;
                                 finalTickAudio.muted = false;
                                 audioInitialized.value = true;
+                                if ('Notification' in window && Notification.permission === 'default') {
+                                    Notification.requestPermission().catch(() => {});
+                                }
                                 console.log('音频上下文已解锁');
                             }).catch(e => {
                                 console.log('音频解锁失败:', e);
@@ -316,6 +320,17 @@
                         } catch (e) {
                             console.log('Final tick音频播放错误:', e);
                         }
+                    }
+                };
+
+                const notifyWhenHidden = (title, body, tag) => {
+                    if (!document.hidden) return;
+                    if (!('Notification' in window)) return;
+                    if (Notification.permission !== 'granted') return;
+                    try {
+                        new Notification(title, { body, tag, silent: false });
+                    } catch (e) {
+                        console.log('通知发送失败:', e);
                     }
                 };
 
@@ -385,7 +400,10 @@
                         if (shouldPlayFinal) {
                             lastFinalSoundCycleKey = finalCycleKey;
                             timeRemaining.value = 0;
-                            if (shouldSoundNow) playFinalTickSound();
+                            if (shouldSoundNow) {
+                                playFinalTickSound();
+                                notifyWhenHidden('PACountdown 提醒', '5 分钟到点', `final-${finalCycleKey}`);
+                            }
 
                             if (finalTickResetTimeout) clearTimeout(finalTickResetTimeout);
                             finalTickResetTimeout = setTimeout(() => {
@@ -422,6 +440,14 @@
                         if (!tickPlayedKeys.has(tickSoundKey)) {
                             tickPlayedKeys.add(tickSoundKey);
                             playTickSound();
+                            if (hiddenTickNotifiedKey !== tickSoundKey) {
+                                hiddenTickNotifiedKey = tickSoundKey;
+                                notifyWhenHidden(
+                                    'PACountdown 提醒',
+                                    `倒计时剩余 ${remainingForDisplay} 秒`,
+                                    `tick-${tickSoundKey}`
+                                );
+                            }
                         }
                     }
 
@@ -550,6 +576,7 @@
                             // 切走后 tick 在后台往往不响，但 tickPlayedKeys 仍被记过；
                             // 清空后当前剩余秒可再响一次。
                             tickPlayedKeys.clear();
+                            hiddenTickNotifiedKey = null;
                             // 不要每次 stop/start 主计时器（易与 250ms 轮询叠加 → 前几声连响、或恢复变慢）
                             if (!isTimerRunning.value) {
                                 checkMarketHours();
