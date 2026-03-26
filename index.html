@@ -155,6 +155,9 @@
                 let audioBuffersReady = false;
                 // 记录哪些周期的 final_tick 已经提前调度，避免重复播放
                 let finalScheduledCycleKeys = new Set();
+                // KeepAlive：防止切后台后 AudioContext 被暂停导致排程声音整体延后
+                let keepAliveSource = null;
+                let keepAliveGain = null;
 
                 // 多语言配置
                 const translations = {
@@ -358,6 +361,30 @@
                         finalTickBuffer = await loadBuffer('final_tick.wav');
                         audioBuffersReady = true;
                         console.log('WebAudio buffer 已就绪');
+
+                        // KeepAlive：创建一个几乎静音的循环，尽量避免 AudioContext 被挂起
+                        //（不同浏览器策略不同，但通常比纯排程更稳定）。
+                        if (!keepAliveSource && audioContext) {
+                            try {
+                                keepAliveGain = audioContext.createGain();
+                                keepAliveGain.gain.value = 0.00001; // 极低音量
+                                keepAliveGain.connect(audioContext.destination);
+
+                                const seconds = 1;
+                                const frameCount = audioContext.sampleRate * seconds;
+                                const buffer = audioContext.createBuffer(1, frameCount, audioContext.sampleRate);
+                                const data = buffer.getChannelData(0);
+                                for (let i = 0; i < data.length; i++) data[i] = 0;
+
+                                keepAliveSource = audioContext.createBufferSource();
+                                keepAliveSource.buffer = buffer;
+                                keepAliveSource.loop = true;
+                                keepAliveSource.connect(keepAliveGain);
+                                keepAliveSource.start();
+                            } catch (e) {
+                                console.log('keepAlive 创建失败:', e);
+                            }
+                        }
                     } catch (e) {
                         console.log('WebAudio buffer 初始化失败:', e);
                     }
